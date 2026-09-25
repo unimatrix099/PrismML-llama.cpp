@@ -1,0 +1,10 @@
+{
+  "version":"2.1.0","source":"loop","timestamp":"2026-09-25T14:40:00Z","status":"BOUNDED","results_tsv":"results.tsv",
+  "findings":[
+    "No further PQ2_0 gain beyond 1.35 t/s (the loop3 NEON q8_K kernel). PQ2_0 remains the fastest Bonsai 2 band on RK3588.",
+    "Offload NOT viable (verified on board): Vulkan via Mesa Panfrost only exposes llvmpipe (CPU software rasterizer), not the Mali-G610; NPU has no backend in the Bonsai fork and is INT8-only (no 2-bit/Hadamard ops); OpenCL exposes the real Mali-G610 (with cl_arm_integer_dot_product_int8) and the fork has an OpenCL backend, but it has NO PQ2_0/Hadamard kernels (Adreno-focused) - would require writing them, and decode is memory-bound on shared LPDDR5 so payoff is capped (~2.4x best case).",
+    "Kernel micro-opt (bsums-offset to drop the per-weight -1 using q8_K's free bsums): bit-exact but A76 wash (0.129 vs 0.131s) - the vsub was hidden by the vdot/dependency chain.",
+    "PQ2_0 q8_K kernel is at its practical optimum: 73% of decode, ~19% per-op barrier spin (the same floor as PTQ1_0), 2-bit vqtbl codec near-minimal."
+  ],
+  "config":{"goal":"more PQ2_0 experiments + NPU/Vulkan/GPU","scope":"ggml/src/ggml-cpu/arch/arm/quants.c + offload backends","metric":"llama-bench tg t/s","direction":"higher_is_better","verify":"board build+bench / A76 standalone microbench"}
+}

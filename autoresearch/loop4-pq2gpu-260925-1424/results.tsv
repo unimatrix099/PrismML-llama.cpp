@@ -1,0 +1,7 @@
+# metric_direction: higher_is_better
+# goal: more PQ2_0 experiments + NPU/Vulkan/GPU feasibility
+iteration	timestamp	commit	metric	delta	guard	status	description
+0	2026-09-25T14:24:32Z	43ce64f4c	1.35	0.0	pass	baseline	PQ2_0 NEON q8_K kernel
+1	2026-09-25T14:24:32Z	-	1.35	0.0	info	no-op	OFFLOAD investigated: Vulkan=llvmpipe only (Panfrost panvk no real GPU); NPU=no fork backend+INT8-only(no 2bit/Hadamard); OpenCL=real Mali-G610+INT8-dot BUT no PQ2_0 kernels+Adreno-focused backend+shared DRAM. None viable.
+2	2026-09-25T14:25:58Z	-	1.35	0.0	pass	discard	bsums-offset (drop -1 via free q8_K bsums): A76 wash 0.129 vs 0.131s - vsub was hidden
+3	2026-09-25T14:25:58Z	-	1.35	0.0	info	no-op	PQ2_0 q8_K kernel at practical optimum (73% of decode, ~19% barrier, 2-bit codec minimal); loop stop
