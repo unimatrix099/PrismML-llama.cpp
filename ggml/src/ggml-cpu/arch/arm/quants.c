@@ -425,15 +425,14 @@ void ggml_vec_dot_ptq1_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const v
         const int8x8_t  w3 = ptq1_unpack8(b8, pow3[3]);
         const int8x8_t  w4 = ptq1_unpack8(b8, pow3[4]);
 
-        // qh 8 trits -> trits 120..127 (order qh0,qh1 per nn=0..3), scalar tail
-        int8_t qh8[8]; int o = 0;
-        for (int nn = 0; nn < 4; ++nn) {
-            for (size_t h = 0; h < sizeof(x->qh); ++h) {
-                const uint8_t v = x[i].qh[h] * pow3[nn];
-                qh8[o++] = (int8_t) ((((uint16_t) v * 3) >> 8) - 1);
-            }
-        }
-        const int8x8_t wq = vld1_s8(qh8);
+        // qh 8 trits -> trits 120..127 (order qh0,qh1 per nn=0..3), vectorized threshold
+        const uint8_t qh0 = x[i].qh[0], qh1 = x[i].qh[1];
+        const uint8_t qhb[8]  = { qh0, qh1, qh0, qh1, qh0, qh1, qh0, qh1 };
+        static const uint8_t qhp[8] = { 1, 1, 3, 3, 9, 9, 27, 27 };
+        const uint8x8_t vh  = vmul_u8(vld1_u8(qhb), vld1_u8(qhp));
+        const int8x8_t  mh1 = vreinterpret_s8_u8(vcge_u8(vh, vdup_n_u8(86)));
+        const int8x8_t  mh2 = vreinterpret_s8_u8(vcge_u8(vh, vdup_n_u8(171)));
+        const int8x8_t  wq  = vsub_s8(vsub_s8(vdup_n_s8(-1), mh1), mh2);
 
         const block_q8_0 * GGML_RESTRICT yb = &y[i * 4];
         const float sumi = ptq1_dot32(u0, u1, yb + 0)
