@@ -365,6 +365,76 @@ void ggml_vec_dot_pq2_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const vo
     *s = sumf;
 }
 
+void ggml_vec_dot_ptq1_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK_PTQ1_0;
+    const int nb = n / qk;
+
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_ptq1_0 * GGML_RESTRICT x = vx;
+    const block_q8_0   * GGML_RESTRICT y = vy;
+
+    float sumf = 0.0f;
+
+#if defined(__ARM_NEON)
+    // trit codec: v = byte*pow3 (u8 wrap); (u16(v)*3)>>8 is in {0,1,2}; minus 1 gives {-1,0,1}
+    static const uint8_t pow3[5] = {1, 3, 9, 27, 81};
+
+    for (int i = 0; i < nb; i++) {
+        int8_t q[QK_PTQ1_0];
+
+        // qs bytes 0..15: one 16-wide store per trit position -> q[0..79]
+        const uint8x16_t b16 = vld1q_u8(x[i].qs);
+        for (int nn = 0; nn < 5; ++nn) {
+            const uint8x16_t v  = vmulq_u8(b16, vdupq_n_u8(pow3[nn]));
+            const uint16x8_t lo = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_low_u8(v)),  3), 8);
+            const uint16x8_t hi = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_high_u8(v)), 3), 8);
+            const int8x16_t  r  = vreinterpretq_s8_u8(vcombine_u8(vmovn_u16(lo), vmovn_u16(hi)));
+            vst1q_s8(q + nn*16, vsubq_s8(r, vdupq_n_s8(1)));
+        }
+
+        // qs bytes 16..23 -> q[80..119]
+        const uint8x8_t b8 = vld1_u8(x[i].qs + 16);
+        for (int nn = 0; nn < 5; ++nn) {
+            const uint8x8_t  v = vmul_u8(b8, vdup_n_u8(pow3[nn]));
+            const uint16x8_t w = vshrq_n_u16(vmulq_n_u16(vmovl_u8(v), 3), 8);
+            vst1_s8(q + 80 + nn*8, vsub_s8(vreinterpret_s8_u8(vmovn_u16(w)), vdup_n_s8(1)));
+        }
+
+        // qh 2 bytes -> q[120..127], scalar tail
+        int o = 120;
+        for (int nn = 0; nn < 4; ++nn) {
+            for (size_t h = 0; h < sizeof(x->qh); ++h) {
+                const uint8_t v  = x[i].qh[h] * pow3[nn];
+                const int16_t xi = ((uint16_t) v * 3) >> 8;
+                q[o++] = (int8_t) (xi - 1);
+            }
+        }
+
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+        float sumi = 0.0f;
+        for (int k = 0; k < 4; k++) {
+            const block_q8_0 * GGML_RESTRICT yb = &y[i * 4 + k];
+            const float d1 = GGML_CPU_FP16_TO_FP32(yb->d);
+            int32x4_t acc = ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(q + k*32),      vld1q_s8(yb->qs));
+            acc           = ggml_vdotq_s32(acc,            vld1q_s8(q + k*32 + 16), vld1q_s8(yb->qs + 16));
+            sumi += d1 * vaddvq_s32(acc);
+        }
+        sumf += d0 * sumi;
+    }
+#else
+    ggml_vec_dot_ptq1_0_q8_0_generic(n, s, bs, vx, bx, vy, by, nrc);
+    return;
+#endif
+
+    *s = sumf;
+}
+
 void ggml_vec_dot_q4_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK8_0;
     const int nb = n / qk;
