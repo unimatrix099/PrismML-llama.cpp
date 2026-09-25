@@ -1,0 +1,7 @@
+# metric_direction: higher_is_better
+# goal: DIFFERENT optimizations for Bonsai 2 PTQ1_0 tg on RK3588 (build/ops/config)
+iteration	timestamp	commit	metric	delta	guard	status	description
+0	2026-09-25T13:34:31Z	02e559a3f	0.86	0.0	pass	baseline	vec_dot kernel exhausted; scope now build+ops+config
+1	2026-09-25T13:40:10Z	-	0.86	0.0	pass	discard	GGML_LTO=ON: no gain (O3 hot loop already optimal); reverting config
+2	2026-09-25T13:49:55Z	-	0.86	0.0	pass	discard	config sweep (KV q8_0, flash-attn): all 0.85-0.86, no short-ctx tg gain
+3	2026-09-25T13:49:55Z	-	0.86	0.0	info	no-op	avenue2 op-reduction: profile shows vec_dot 81%, ~13% barrier spin only headroom; needs invasive ggml op-fusion (sign+FWHT), high correctness risk, ~4-5% realistic - NOT pursued

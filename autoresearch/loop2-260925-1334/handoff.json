@@ -1,0 +1,11 @@
+{
+  "version": "2.1.0", "source": "loop", "timestamp": "2026-09-25T13:49:55Z", "status": "BOUNDED",
+  "results_tsv": "results.tsv",
+  "findings": [
+    "No further tg gain found across all 3 avenues; 0.86 t/s (2.26x) stands as the practical ceiling.",
+    "Build (GGML_LTO=ON): 0.86, no gain - the -O3 hot vec_dot loop is already optimal, cross-module inlining does not help.",
+    "Config (KV q8_0, flash-attn on): 0.85-0.86, no gain - these knobs do not affect short-context token generation.",
+    "Op-reduction (avenue 2): re-profile shows vec_dot 81%, ~13% threadpool-barrier spin is the ONLY remaining headroom. Capturing it needs invasive ggml op-fusion (fold sign-flip ggml_mul into the FWHT across ~300 sites/token), high whole-model correctness risk, ~4-5% realistic payoff. Researched, not pursued - risk/reward unfavorable on an already-2.26x kernel."
+  ],
+  "config": {"goal": "different optimizations for Bonsai 2 PTQ1_0 tg on RK3588", "scope": "build/ops/config", "metric": "llama-bench tg t/s", "direction": "higher_is_better", "verify": "board build + bench_tg"}
+}
