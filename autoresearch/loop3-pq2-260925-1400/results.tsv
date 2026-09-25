@@ -1,0 +1,8 @@
+# metric_direction: higher_is_better
+# goal: optimize Bonsai 2 PQ2_0 tg on RK3588
+# scope: ggml/src/ggml-cpu/arch/arm/quants.c (ggml_vec_dot_pq2_0_q8_0)
+iteration	timestamp	commit	metric	delta	guard	status	description
+0	2026-09-25T14:00:08Z	3e106ca7f	0.32	0.0	pass	baseline	PQ2_0 native ARM kernel (unoptimized)
+1	2026-09-25T14:06:13Z	-	0.32	0.0	info	no-op	PROFILE: hot fn is ggml_vec_dot_pq2_0_q8_K (88%), SCALAR-only on ARM (not the q8_0 kernel). Real target = NEON pq2_0_q8_K
+2	2026-09-25T14:12:19Z	0e07eef3d	1.35	+1.03	pass	keep	NEON ggml_vec_dot_pq2_0_q8_K (was scalar): 0.32 -> 1.35 t/s (4.2x), bit-exact
+3	2026-09-25T14:14:40Z	-	1.35	0.0	info	no-op	re-profile @1.35: q8_K kernel now 73%, ~19% barrier; 2-bit codec near-minimal, diminishing returns - stop

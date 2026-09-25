@@ -1,0 +1,11 @@
+{
+  "version":"2.1.0","source":"loop","timestamp":"2026-09-25T14:30:00Z","status":"BOUNDED","results_tsv":"results.tsv",
+  "findings":[
+    "PQ2_0 tg 0.32 -> 1.35 t/s (4.2x), bit-exact, coherent output. PQ2_0 is now the FASTEST Bonsai 2 band on RK3588, ahead of PTQ1_0 (0.86) and higher precision (2.16 vs 1.75 bpw).",
+    "Root cause (found by profiling): PQ2_0 weight matrices (ne[0]%256==0) dot against Q8_K, and ggml_vec_dot_pq2_0_q8_K was scalar-only on ARM (88% of decode). The q8_0 variant I'd examined earlier was not the hot path.",
+    "Fix: NEON ggml_vec_dot_pq2_0_q8_K (2-bit vqtbl codec; Q8_K single per-256 scale -> one int32 accumulator, scaled once). Microbench 5.36x over scalar on A76.",
+    "Re-profile @1.35: kernel 73%, ~19% barrier spin. 2-bit codec near-minimal; remaining headroom is the barrier floor (same as PTQ1_0). Stopped - diminishing returns.",
+    "Recommendation flip: PQ2_0 is now the best band for this board."
+  ],
+  "config":{"goal":"optimize Bonsai 2 PQ2_0 tg on RK3588","scope":"ggml/src/ggml-cpu/arch/arm/quants.c","metric":"llama-bench tg t/s","direction":"higher_is_better","verify":"board build + bench_pq2"}
+}
