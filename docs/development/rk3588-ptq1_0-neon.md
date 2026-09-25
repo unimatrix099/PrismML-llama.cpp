@@ -83,10 +83,31 @@ dependency latency, not instruction fetch or cache misses.
 Decode stays compute-bound on the ternary unpack. The memory-bandwidth roofline
 (about 3.8 t/s = 22 GB/s sustained / 5.9 GB) assumes the compute is free, so it is
 not reachable on this CPU for this format; pre-unpacking the weights to int8 to
-remove the per-token unpack would need about 24 GB (the board has 16 GB). The
-largest untried pure-kernel lever is a PTQ1_0 4-row repack GEMV (more independent
-dot products in flight); it is a much bigger change with uncertain on-device
-payoff given the per-op barrier floor.
+remove the per-token unpack would need about 24 GB (the board has 16 GB).
+
+## Next lever: 4-row repack GEMV (validated, integration in progress)
+
+The largest remaining pure-kernel lever is a PTQ1_0 4-row repack GEMV: process 4
+weight rows per call against the shared activation, keeping 4 independent SDOT
+accumulator streams (fills the backend-idle slots) and computing sum(y) once per
+activation block instead of per row.
+
+Prototyped and measured on the A76 (bit-exact vs the per-row reference):
+
+| Variant | vs the production single-row kernel |
+|---|:---:|
+| gemv2 (2-row) | 1.14x |
+| gemv4 (4-row) | 1.24x |
+
+Benchmark note: comparing against a single-row loop with identical inputs lets the
+compiler CSE/hoist the baseline and reports a false slowdown; the numbers above
+perturb one input byte per iteration to defeat that. The win combines the sum(y)
+amortization (which does not pay in the per-row kernel, only across rows) with
+row-level ILP. 4-row beats 2-row despite register spills.
+
+Integration follows the existing `block_q1_0x4` / `block_pq2_0` repack path
+(`ggml_repack_get_optimal_repack_type`, `make_block_*`, `repack_*_to_*_4_bl`,
+`ggml_gemv/gemm_*_4x8_q8_0`, and the `tensor_traits<...>` registration).
 
 ## Files
 
