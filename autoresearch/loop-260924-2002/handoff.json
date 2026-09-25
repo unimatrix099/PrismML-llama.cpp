@@ -1,0 +1,20 @@
+{
+  "version": "2.1.0",
+  "source": "loop",
+  "timestamp": "2026-09-25T13:24:09Z",
+  "status": "BOUNDED",
+  "results_tsv": "results.tsv",
+  "findings": [
+    "Iteration 1 KEEP: vectorizing the PTQ1_0 qh 8-trit scalar tail (threshold decode) raised board tg 0.80 -> 0.86 t/s (+7.5%), bit-exact. Committed 21106d58e.",
+    "Plateau reached: dot fp-reduction (vpaddq), skip-x1 multiply, and 2-block unroll all show no gain on the A76 standalone microbench (~2.10-2.11x), so they were not board-verified.",
+    "Kernel is at its practical throughput floor on this CPU: unpack is ~5 NEON ops/16-trit (near-minimal), OoO already covers single-block ILP, dot fp overhead is small.",
+    "Overall PTQ1_0 decode: 0.38 (scalar) -> 0.86 t/s = 2.26x across all optimization work."
+  ],
+  "config": {
+    "goal": "optimize Bonsai 2 PTQ1_0 tg on RK3588",
+    "scope": "ggml/src/ggml-cpu/arch/arm/quants.c",
+    "metric": "llama-bench tg64 t/s (PTQ1_0, -ngl 0 -t 8, performance governor)",
+    "direction": "higher_is_better",
+    "verify": "sync quants.c to board, cmake --build --target llama-bench, bench_tg.sh, extract tg64"
+  }
+}

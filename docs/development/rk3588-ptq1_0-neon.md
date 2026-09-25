@@ -16,7 +16,8 @@ governor, build prism-b10735):
 | local native (`GGML_NATIVE=ON`)     | 0.38 | scalar ptq1_0, no gain from `-mcpu` |
 | local native + kernel (temp buffer) | 0.67 | 1.76x |
 | local native + kernel (fused)       | 0.70 | 1.84x |
-| local native + kernel (threshold unpack) | 0.80 | **2.1x** |
+| local native + kernel (threshold unpack) | 0.80 | 2.1x |
+| local native + kernel (+ vectorized qh tail) | 0.86 | **2.26x** |
 
 Standalone microbenchmark (see test harness below), one core, cache-resident:
 - dot vectorized only (SDOT), unpack still scalar: 1.03x (dot was not the cost)

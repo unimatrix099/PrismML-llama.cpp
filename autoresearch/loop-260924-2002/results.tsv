@@ -1,0 +1,10 @@
+# metric_direction: higher_is_better
+# goal: optimize Bonsai 2 PTQ1_0 tg on RK3588
+# metric: llama-bench tg64 t/s (PTQ1_0, -ngl 0 -t 8, perf governor)
+# scope: ggml/src/ggml-cpu/arch/arm/quants.c
+iteration	timestamp	commit	metric	delta	guard	status	description
+0	2026-09-25T13:15:27Z	37b0bab58	0.80	0.0	pass	baseline	threshold unpack kernel (already committed 37b0bab58)
+1	2026-09-25T13:20:28Z	21106d58e	0.86	+0.06	pass	keep	vectorize qh 8-trit tail (threshold)
+2	2026-09-25T13:24:09Z	-	0.86	0.0	pass	discard	vectorized dot fp-reduction (vpaddq): A76 microbench wash, not board-verified
+3	2026-09-25T13:24:09Z	-	0.86	0.0	pass	discard	skip pow3[0]=1 multiply: A76 microbench wash
+4	2026-09-25T13:24:09Z	-	0.86	0.0	pass	discard	2-block unroll for ILP: A76 microbench 2.10x vs 2.11x (no gain; OoO already covers it)
