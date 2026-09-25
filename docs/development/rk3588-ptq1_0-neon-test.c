@@ -121,46 +121,48 @@ static inline int8x8_t unpack8(uint8x8_t bytes, uint8_t p) {
     uint16x8_t w = vshrq_n_u16(vmulq_n_u16(vmovl_u8(v), 3), 8);
     return vsub_s8(vreinterpret_s8_u8(vmovn_u16(w)), vdup_n_s8(1));
 }
+// fused dot of one 32-trit group (two int8x16 halves) against one q8_0 block
+static inline float ptq1_dot32(int8x16_t a, int8x16_t b, const block_q8_0 * GGML_RESTRICT yb) {
+    int32x4_t acc = vdotq_s32(vdupq_n_s32(0), a, vld1q_s8(yb->qs));
+    acc = vdotq_s32(acc, b, vld1q_s8(yb->qs + 16));
+    return GGML_CPU_FP16_TO_FP32(yb->d) * (float) vaddvq_s32(acc);
+}
 void neon_ptq1(int n, float * GGML_RESTRICT s, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy) {
     const int qk = QK_PTQ1_0;
     const int nb = n / qk;
     const block_ptq1_0 * GGML_RESTRICT x = vx;
     const block_q8_0   * GGML_RESTRICT y = vy;
-    static const uint8_t pow3[6] = {1, 3, 9, 27, 81, 243};
+    static const uint8_t pow3[5] = {1, 3, 9, 27, 81};
     float sumf = 0.0f;
     for (int i = 0; i < nb; i++) {
-        int8_t q[QK_PTQ1_0];
-        // qs 16-chunk (bytes 0..15) -> q[0..79], one 16-wide store per trit position
-        const uint8x16_t b16 = vld1q_u8(x[i].qs);
-        for (int nn = 0; nn < 5; ++nn) vst1q_s8(q + nn*16, unpack16(b16, pow3[nn]));
-        // qs 8-chunk (bytes 16..23) -> q[80..119]
-        const uint8x8_t b8 = vld1_u8(x[i].qs + 16);
-        for (int nn = 0; nn < 5; ++nn) vst1_s8(q + 80 + nn*8, unpack8(b8, pow3[nn]));
-        // qh (2 bytes) -> q[120..127], scalar (tiny)
-        int o = 120;
-        for (int nn = 0; nn < 4; ++nn) {
+        __builtin_prefetch((const char *)(x + i) + 512, 0, 0);
+        // unpack directly into the 4 dot groups; no memory temp
+        const uint8x16_t b16 = vld1q_u8(x[i].qs);       // bytes 0..15 -> trits 0..79
+        const uint8x8_t  b8  = vld1_u8(x[i].qs + 16);   // bytes 16..23 -> trits 80..119
+        const int8x16_t u0 = unpack16(b16, pow3[0]);
+        const int8x16_t u1 = unpack16(b16, pow3[1]);
+        const int8x16_t u2 = unpack16(b16, pow3[2]);
+        const int8x16_t u3 = unpack16(b16, pow3[3]);
+        const int8x16_t u4 = unpack16(b16, pow3[4]);
+        const int8x8_t  w0 = unpack8(b8, pow3[0]);
+        const int8x8_t  w1 = unpack8(b8, pow3[1]);
+        const int8x8_t  w2 = unpack8(b8, pow3[2]);
+        const int8x8_t  w3 = unpack8(b8, pow3[3]);
+        const int8x8_t  w4 = unpack8(b8, pow3[4]);
+        // qh 8 trits -> trits 120..127 (order: qh0,qh1 per nn=0..3), scalar
+        int8_t qh8[8]; int o = 0;
+        for (int nn = 0; nn < 4; ++nn)
             for (size_t h = 0; h < sizeof(x->qh); ++h) {
-                const uint8_t v  = x[i].qh[h] * pow3[nn];
-                const int16_t xi = ((uint16_t) v * 3) >> 8;
-                q[o++] = (int8_t) (xi - 1);
+                const uint8_t v = x[i].qh[h] * pow3[nn];
+                qh8[o++] = (int8_t)((((uint16_t) v * 3) >> 8) - 1);
             }
-        }
-        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
-        float sumi = 0.0f;
-        for (int k = 0; k < 4; k++) {
-            const block_q8_0 * GGML_RESTRICT yb = &y[i * 4 + k];
-            const float d1 = GGML_CPU_FP16_TO_FP32(yb->d);
-            const int8x16_t q0 = vld1q_s8(q + k*32);
-            const int8x16_t q1 = vld1q_s8(q + k*32 + 16);
-            const int8x16_t y0 = vld1q_s8(yb->qs);
-            const int8x16_t y1 = vld1q_s8(yb->qs + 16);
-            int32x4_t acc = vdupq_n_s32(0);
-            acc = vdotq_s32(acc, q0, y0);
-            acc = vdotq_s32(acc, q1, y1);
-            const int sumi_block = vaddvq_s32(acc);
-            sumi += d1 * sumi_block;
-        }
-        sumf += d0 * sumi;
+        const int8x8_t wq = vld1_s8(qh8);
+        const block_q8_0 * GGML_RESTRICT yb = &y[i * 4];
+        float sumi = ptq1_dot32(u0, u1, yb + 0)
+                   + ptq1_dot32(u2, u3, yb + 1)
+                   + ptq1_dot32(u4, vcombine_s8(w0, w1), yb + 2)
+                   + ptq1_dot32(vcombine_s8(w2, w3), vcombine_s8(w4, wq), yb + 3);
+        sumf += GGML_CPU_FP16_TO_FP32(x[i].d) * sumi;
     }
     *s = sumf;
 }
