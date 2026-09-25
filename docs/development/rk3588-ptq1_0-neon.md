@@ -15,12 +15,27 @@ governor, build prism-b10735):
 | generic prebuilt (armv8.2)          | 0.38 | scalar ptq1_0 |
 | local native (`GGML_NATIVE=ON`)     | 0.38 | scalar ptq1_0, no gain from `-mcpu` |
 | local native + kernel (temp buffer) | 0.67 | 1.76x |
-| local native + kernel (fused)       | 0.70 | **1.84x** |
+| local native + kernel (fused)       | 0.70 | 1.84x |
+| local native + kernel (threshold unpack) | 0.80 | **2.1x** |
 
 Standalone microbenchmark (see test harness below), one core, cache-resident:
 - dot vectorized only (SDOT), unpack still scalar: 1.03x (dot was not the cost)
 - unpack + dot vectorized, temp buffer: 2.05x
 - unpack + dot fused (no temp): 2.28x
+- fused + threshold unpack: 2.79x (container) / 1.26x over fused on the A76
+
+## The unpack is the long pole, and the shift is a step function
+
+The vec_dot is ~86% of decode and the unpack (not the dot) is its cost. The base-3
+trit decode `(v*3)>>8` for a byte `v` in [0,255] is a 2-threshold step: it is 0 for
+v<86, 1 for 86<=v<171, and 2 for v>=171. So the whole widen (`vmovl`) / multiply
+(`vmulq_n_u16`) / shift (`vshrq_n_u16`) / narrow (`vmovn`) chain (~9 ops per 16 trits,
+and it leaves u8 to work in u16) collapses to two `vcgeq_u8` compares that stay in u8:
+
+    q = -1 - (v >= 86) - (v >= 171)
+
+That roughly halves the unpack op count and is the largest single kernel win here
+(0.70 -> 0.80 t/s end to end). Bit-exact with the reference.
 
 ## Why
 

@@ -110,16 +110,18 @@ void ref_ptq1(int n, float * GGML_RESTRICT s, const void * GGML_RESTRICT vx, con
 // ---------------- NEON version (vectorized unpack + SDOT dot) ----------------
 // unpack one trit: v = byte*pow3 (u8 wrap); xi = (u16(v)*3)>>8 in {0,1,2}; q = xi-1.
 static inline int8x16_t unpack16(uint8x16_t bytes, uint8_t p) {
-    uint8x16_t v = vmulq_u8(bytes, vdupq_n_u8(p));
-    uint16x8_t lo = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_low_u8(v)),  3), 8);
-    uint16x8_t hi = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_high_u8(v)), 3), 8);
-    int8x16_t r = vreinterpretq_s8_u8(vcombine_u8(vmovn_u16(lo), vmovn_u16(hi)));
-    return vsubq_s8(r, vdupq_n_s8(1));
+    // (v*3)>>8 for v in [0,255] is a 2-threshold step: 0 if v<86, 1 if v<171, else 2
+    const uint8x16_t v  = vmulq_u8(bytes, vdupq_n_u8(p));
+    const int8x16_t  m1 = vreinterpretq_s8_u8(vcgeq_u8(v, vdupq_n_u8(86)));   // 0xFF (=-1) if >=86
+    const int8x16_t  m2 = vreinterpretq_s8_u8(vcgeq_u8(v, vdupq_n_u8(171)));  // 0xFF (=-1) if >=171
+    // xi = (>=86) + (>=171) = -m1 - m2 ; q = xi - 1 = -1 - m1 - m2
+    return vsubq_s8(vsubq_s8(vdupq_n_s8(-1), m1), m2);
 }
 static inline int8x8_t unpack8(uint8x8_t bytes, uint8_t p) {
-    uint8x8_t v = vmul_u8(bytes, vdup_n_u8(p));
-    uint16x8_t w = vshrq_n_u16(vmulq_n_u16(vmovl_u8(v), 3), 8);
-    return vsub_s8(vreinterpret_s8_u8(vmovn_u16(w)), vdup_n_s8(1));
+    const uint8x8_t v  = vmul_u8(bytes, vdup_n_u8(p));
+    const int8x8_t  m1 = vreinterpret_s8_u8(vcge_u8(v, vdup_n_u8(86)));
+    const int8x8_t  m2 = vreinterpret_s8_u8(vcge_u8(v, vdup_n_u8(171)));
+    return vsub_s8(vsub_s8(vdup_n_s8(-1), m1), m2);
 }
 // fused dot of one 32-trit group (two int8x16 halves) against one q8_0 block
 static inline float ptq1_dot32(int8x16_t a, int8x16_t b, const block_q8_0 * GGML_RESTRICT yb) {
