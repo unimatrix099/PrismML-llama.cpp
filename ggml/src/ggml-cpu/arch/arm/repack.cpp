@@ -14,6 +14,7 @@
 #include <cassert>
 #include <cstdlib> // for qsort
 #include <cstdio>  // for GGML_ASSERT
+#include <vector>
 
 #define GGML_CPU_CLANG_WORKAROUND
 #include "../../repack.h"
@@ -1967,6 +1968,80 @@ void ggml_gemv_q1_0_4x8_q8_0(int                        n,
     ggml_gemv_q1_0_4x8_q8_0_generic(n, s, bs, vx, vy, nr, nc);
 }
 
+
+#if defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_DOTPROD)
+// unpack one ptq1_0 row into xi{0,1,2} vectors and dot vs the shared activation, applying the
+// -1 offset via a precomputed sum(y) that is amortized across the 4 rows of the group.
+static inline int8x16_t ptq1_up16(uint8x16_t b, uint8_t p) {
+    uint8x16_t v = vmulq_u8(b, vdupq_n_u8(p));
+    uint16x8_t lo = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_low_u8(v)),  3), 8);
+    uint16x8_t hi = vshrq_n_u16(vmulq_n_u16(vmovl_u8(vget_high_u8(v)), 3), 8);
+    return vreinterpretq_s8_u8(vcombine_u8(vmovn_u16(lo), vmovn_u16(hi)));
+}
+static inline int8x8_t ptq1_up8(uint8x8_t b, uint8_t p) {
+    uint8x8_t v = vmul_u8(b, vdup_n_u8(p));
+    return vreinterpret_s8_u8(vmovn_u16(vshrq_n_u16(vmulq_n_u16(vmovl_u8(v), 3), 8)));
+}
+static inline float ptq1_dotxi(int8x16_t a, int8x16_t b, const block_q8_0 * GGML_RESTRICT yb, int sumy) {
+    int32x4_t acc = vdotq_s32(vdupq_n_s32(0), a, vld1q_s8(yb->qs));
+    acc = vdotq_s32(acc, b, vld1q_s8(yb->qs + 16));
+    return GGML_CPU_FP16_TO_FP32(yb->d) * (float)(vaddvq_s32(acc) - sumy);
+}
+static inline float ptq1_rowdot(const uint8_t * GGML_RESTRICT qs, const uint8_t * GGML_RESTRICT qh,
+                                const block_q8_0 * GGML_RESTRICT yb, const int sumy[4]) {
+    static const uint8_t p[5] = {1, 3, 9, 27, 81};
+    const uint8x16_t b16 = vld1q_u8(qs);
+    const uint8x8_t  b8  = vld1_u8(qs + 16);
+    const int8x16_t u0 = ptq1_up16(b16, p[0]), u1 = ptq1_up16(b16, p[1]), u2 = ptq1_up16(b16, p[2]);
+    const int8x16_t u3 = ptq1_up16(b16, p[3]), u4 = ptq1_up16(b16, p[4]);
+    const int8x8_t  w0 = ptq1_up8(b8, p[0]), w1 = ptq1_up8(b8, p[1]), w2 = ptq1_up8(b8, p[2]);
+    const int8x8_t  w3 = ptq1_up8(b8, p[3]), w4 = ptq1_up8(b8, p[4]);
+    int8_t qh8[8]; int o = 0;
+    for (int nn = 0; nn < 4; ++nn) for (int h = 0; h < PTQ1_0_QH; ++h) {
+        const uint8_t v = qh[h] * p[nn];
+        qh8[o++] = (int8_t)(((uint16_t) v * 3) >> 8);
+    }
+    const int8x8_t wq = vld1_s8(qh8);
+    return ptq1_dotxi(u0, u1, yb + 0, sumy[0])
+         + ptq1_dotxi(u2, u3, yb + 1, sumy[1])
+         + ptq1_dotxi(u4, vcombine_s8(w0, w1), yb + 2, sumy[2])
+         + ptq1_dotxi(vcombine_s8(w2, w3), vcombine_s8(w4, wq), yb + 3, sumy[3]);
+}
+#endif
+
+void ggml_gemv_ptq1_0_4x8_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
+    const int qk = QK_PTQ1_0;
+    const int nb = n / qk;
+    const int ncols_interleaved = 4;
+    assert(n % qk == 0);
+    assert(nc % ncols_interleaved == 0);
+    UNUSED(bs);
+    UNUSED(nr);
+#if defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_DOTPROD)
+    const block_q8_0 * a_ptr = (const block_q8_0 *) vy;
+    // sum(y) depends only on the activation; compute once and reuse across all output-row groups
+    std::vector<int> sumy_buf((size_t) nb * 4);
+    int * sumy = sumy_buf.data();
+    for (int l = 0; l < nb; l++) {
+        const block_q8_0 * yb = a_ptr + l * 4;
+        for (int k = 0; k < 4; k++) sumy[l * 4 + k] = vaddlvq_s8(vld1q_s8(yb[k].qs)) + vaddlvq_s8(vld1q_s8(yb[k].qs + 16));
+    }
+    for (int c = 0; c < nc / ncols_interleaved; c++) {
+        const block_ptq1_0x4 * b_ptr = (const block_ptq1_0x4 *) vx + c * nb;
+        float sm[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (int l = 0; l < nb; l++) {
+            const block_q8_0 * yb = a_ptr + l * 4;
+            for (int r = 0; r < ncols_interleaved; r++) {
+                sm[r] += GGML_CPU_FP16_TO_FP32(b_ptr[l].d[r]) *
+                         ptq1_rowdot(b_ptr[l].qs + r * PTQ1_0_QS, b_ptr[l].qh + r * PTQ1_0_QH, yb, sumy + l * 4);
+            }
+        }
+        for (int r = 0; r < ncols_interleaved; r++) s[c * ncols_interleaved + r] = sm[r];
+    }
+    return;
+#endif
+    ggml_gemv_ptq1_0_4x8_q8_0_generic(n, s, bs, vx, vy, nr, nc);
+}
 
 void ggml_gemm_q4_0_4x4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
     const int qk = QK8_0;
