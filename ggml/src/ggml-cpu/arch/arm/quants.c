@@ -449,6 +449,54 @@ void ggml_vec_dot_ptq1_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const v
     *s = sumf;
 }
 
+void ggml_vec_dot_pq2_0_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(n % QK_K == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_pq2_0 * GGML_RESTRICT x = vx;
+    const block_q8_K  * GGML_RESTRICT y = vy;
+    const int nb = n / QK_PQ2_0;
+
+    float sumf = 0.0f;
+
+#if defined(__ARM_NEON)
+    // 2-bit codec (same as pq2_0 x q8_0), but q8_K has a single float scale per 256,
+    // so all 4 sub-blocks accumulate into one integer, reduced and scaled once per block.
+    static const uint8_t tbl_idx_lo[16] = {0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3};
+    static const uint8_t tbl_idx_hi[16] = {4,4,4,4, 5,5,5,5, 6,6,6,6, 7,7,7,7};
+    static const int8_t  shift_vals[16] = {0,-2,-4,-6, 0,-2,-4,-6, 0,-2,-4,-6, 0,-2,-4,-6};
+    const uint8x16_t idx_lo = vld1q_u8(tbl_idx_lo);
+    const uint8x16_t idx_hi = vld1q_u8(tbl_idx_hi);
+    const int8x16_t  shifts = vld1q_s8(shift_vals);
+    const uint8x16_t mask2  = vdupq_n_u8(0x03);
+    const int8x16_t  one    = vdupq_n_s8(1);
+
+    for (int i = 0; i < nb; i++) {
+        const block_q8_K * GGML_RESTRICT yb = &y[i >> 1];
+        const int8_t * GGML_RESTRICT q8 = yb->qs + 128 * (i & 1);
+        int32x4_t acc = vdupq_n_s32(0);
+        for (int k = 0; k < 4; k++) {
+            const uint8x8_t  raw   = vld1_u8(&x[i].qs[k * 8]);
+            const uint8x16_t raw16 = vcombine_u8(raw, raw);
+            const int8x16_t qv0 = vsubq_s8(vreinterpretq_s8_u8(vandq_u8(vshlq_u8(vqtbl1q_u8(raw16, idx_lo), shifts), mask2)), one);
+            const int8x16_t qv1 = vsubq_s8(vreinterpretq_s8_u8(vandq_u8(vshlq_u8(vqtbl1q_u8(raw16, idx_hi), shifts), mask2)), one);
+            acc = ggml_vdotq_s32(acc, qv0, vld1q_s8(q8 + 32 * k));
+            acc = ggml_vdotq_s32(acc, qv1, vld1q_s8(q8 + 32 * k + 16));
+        }
+        sumf += (GGML_CPU_FP16_TO_FP32(x[i].d) * yb->d) * (float) vaddvq_s32(acc);
+    }
+#else
+    ggml_vec_dot_pq2_0_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
+    return;
+#endif
+
+    *s = sumf;
+}
+
 void ggml_vec_dot_q4_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK8_0;
     const int nb = n / qk;

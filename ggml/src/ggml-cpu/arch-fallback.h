@@ -82,9 +82,7 @@
 #define ggml_gemm_q1_0_4x8_q8_0_generic ggml_gemm_q1_0_4x8_q8_0
 #define ggml_gemm_pq2_0_4x8_q8_0_generic ggml_gemm_pq2_0_4x8_q8_0
 #elif defined(__aarch64__) || defined(__arm__) || defined(_M_ARM) || defined(_M_ARM64)
-// PTQ1_0 has a native NEON vec_dot in arch/arm/quants.c
-// PQ2_0 x Q8_K has only the generic vec_dot outside x86; alias it until a SIMD version lands
-#define ggml_vec_dot_pq2_0_q8_K_generic ggml_vec_dot_pq2_0_q8_K
+// PTQ1_0 and PQ2_0 x Q8_K have native NEON vec_dot in arch/arm/quants.c
 // repack.cpp
 #define ggml_quantize_mat_q8_K_4x4_generic ggml_quantize_mat_q8_K_4x4
 #define ggml_quantize_mat_q8_K_4x8_generic ggml_quantize_mat_q8_K_4x8
