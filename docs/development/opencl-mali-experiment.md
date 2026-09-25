@@ -46,7 +46,51 @@ of the subgroup ops (which assume exactly 16 lanes) would also need per-kernel v
   results are consistently *slower* than CPU for token generation. Best realistic case here
   is parity, more likely a regression from dispatch overhead + untuned Mali work-group sizes.
 
-## Verdict
+## Verdict (port)
 The tuned CPU NEON kernels (PQ2_0 @ 1.35 t/s, PTQ1_0 @ 0.86 t/s) remain the right path for
 Bonsai 2 decode on RK3588. The Mali branch is preserved for reference but should not be
 merged or extended.
+
+---
+
+# From-scratch GPU feasibility study (measure-first, standalone OpenCL probes)
+
+Rather than port the backend, measure whether ANY from-scratch Mali kernel could beat the
+CPU. Probes: `scratchpad/mali_bw*.c`, `mali_gemv*.c` (raw C + libOpenCL on the board).
+
+## Device facts (clinfo)
+Mali-G610 r0p0 (MP4): **4 compute units @ 1000 MHz**, 32 KB "local" memory whose type is
+**`Global`** (no on-chip SRAM scratchpad — tiling does not hide bandwidth), fp16 native,
+`cl_khr_subgroups`, `cl_arm_integer_dot_product_accumulate_int8`. Shares the 16 GB LPDDR5
+with the CPU (no VRAM).
+
+## Measured throughput (weight-throughput is the deciding unit; token/s = Gw/s ÷ 26.9)
+| Path | GB/s | Gw/s | 27B proj t/s |
+|------|-----:|-----:|-------------:|
+| **CPU NEON PQ2_0 (actual, deployed)** | ~9.8 eff | **36.3** | **1.35** |
+| Mali peak coalesced read (uint16, tuned) | **19.7** | — | 2.72 ceiling |
+| Mali int8 GEMV (no unpack, memory-bound @115% read-peak) | 22.7 | 22.6 | 0.84 |
+| Mali 2-bit GEMV, vectorized unpack + deinterleaved act | 2.5 | 9.8 | 0.37 |
+| Mali 2-bit GEMV, scalar unpack | 1.5 | 5.9 | 0.22 |
+
+## Conclusion: NO-GO. A from-scratch GPU decode path cannot beat the CPU here.
+- **The GPU's absolute ceiling is below the CPU.** Even the trivial int8 GEMV — no unpack,
+  running memory-bound at ~peak read BW — reaches only **22.6 Gw/s**, already below the CPU's
+  measured **36.3 Gw/s**. Any real low-bit kernel adds unpack work and is *slower* than that.
+- **Mali peak read BW (19.7 GB/s) < the CPU's effective rate for this workload.** The 4×A76
+  cores with SDOT/i8mm NEON + a real cache hierarchy simply out-throughput the 4-core iGPU.
+- **2-bit unpack is ALU-bound on Mali**, not memory-bound: 2 bpw gives 4× memory headroom
+  (2.5 GB/s used vs 19.7 available) but the mask/shift/convert/reduce work caps it at
+  ~10 Gw/s. `arm_dot` would help the MAC but not the unpack/convert bottleneck, and cannot
+  lift it past the int8 memory-bound ceiling of 22.6 Gw/s.
+- **Unified memory removes the usual GPU win.** No VRAM, no fast scratchpad (local=DRAM),
+  same LPDDR5 bus — the GPU cannot add bandwidth in parallel with the CPU.
+
+**Net: a from-scratch Mali kernel projects to 0.4–0.8 t/s vs the CPU's 1.35 t/s — a 2–3×
+regression — for a large implementation effort (custom PQ2/PTQ1 kernels + repacked weight
+layout + Hadamard + attention/KV glue). Not worth building.** The CPU NEON path is not just
+convenient, it is genuinely the faster engine for low-bit GEMV decode on this SoC.
+
+Where the board's GPU *could* pay off (not decode): large-batch **prompt/prefill** (compute-
+bound GEMM, where the GPU's FLOPS matter and memory is amortized) — but that is not the
+1-token/step decode bottleneck the user is optimizing.
