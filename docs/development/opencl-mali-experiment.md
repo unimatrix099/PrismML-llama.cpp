@@ -25,12 +25,26 @@ the existing CPU path. **Recommendation: do not pursue GPU offload for decode on
 5. **Matmul/op dispatch** — ~39 `if (INTEL){…} else if (ADRENO){…} else ASSERT` sites in
    `ggml_cl_mul_mat` etc. Made the INTEL branch (sg=16) also accept MALI.
 
-## Current blocker (gate 6): runtime kernel-launch failure
+## Gate 6: launch VALIDITY — one generic fix (not open-ended)
 
-`clEnqueueNDRangeKernel` fails (`CL_CHECK` abort at ggml-opencl.cpp:1049). The Intel
-work-group / local-size parameters are not valid for Mali's execution limits — this is
-**per-kernel work-group tuning**, i.e. open-ended porting, not one more patch. Correctness
-of the subgroup ops (which assume exactly 16 lanes) would also need per-kernel verification.
+`clEnqueueNDRangeKernel` fails with **`CL_INVALID_WORK_GROUP_SIZE` (-54)** — first on
+`kernel_sigmoid_f32` launched with `gws=[32]` but `lws=[64]` (workgroup larger than the
+problem). The Adreno/Intel drivers tolerated invalid geometries; Mali's `libmali` enforces
+the spec. Fixed generically by clamping `lws[i] = min(lws[i], gws[i])` (and down to a divisor
+of `gws[i]`) in the shared `enqueue_ndrange_kernel` helper. With that ONE change the whole
+LFM2.5 Q4_0 graph runs end-to-end on Mali — no crashes.
+
+## Gate 7: launch CORRECTNESS — this is the real, open-ended blocker
+
+The model runs but emits **garbage** (`"The capital of France is ... umps6666666..."`), at
+**8.40 t/s — already slower than the same model on CPU (8.72 t/s)**. The kernels were written
+against Adreno/Qualcomm and Intel **subgroup semantics**: forcing the Intel path + empty-
+defining the required-subgroup-size attribute (Mali ignores it) lets the driver pick a subgroup
+width that doesn't match each kernel's reduction/broadcast logic, and the lws clamp further
+perturbs the workgroup sizes those reductions depend on. Result: silent numerical corruption
+across every subgroup-dependent kernel (matmul, norms, softmax, …). Fixing this is **per-kernel
+correctness validation**, i.e. the genuinely open-ended work — and it lands slower than CPU even
+if completed. This is why the port is abandoned.
 
 ## Why it isn't worth finishing
 
@@ -94,3 +108,48 @@ convenient, it is genuinely the faster engine for low-bit GEMV decode on this So
 Where the board's GPU *could* pay off (not decode): large-batch **prompt/prefill** (compute-
 bound GEMM, where the GPU's FLOPS matter and memory is amortized) — but that is not the
 1-token/step decode bottleneck the user is optimizing.
+
+---
+
+# NPU + heterogeneous CPU+GPU decode study (2026-09-25)
+
+Follow-up: can the **NPU**, or **CPU+GPU together**, speed up decode?
+
+## NPU (RKNPU / RK3588 6-TOPS): NO-GO on availability AND fundamentals
+- Kernel driver *is* loaded (`RKNPU fdab0000.npu` in dmesg), but the **userspace stack is
+  absent**: no `librknnrt.so`, no `.rknn` models, no rknn-toolkit / python bindings, and
+  **no rknpu backend in the fork's ggml** (grep clean).
+- RKNN's op set targets CNN/vision + encoder transformers — **not autoregressive LLM decode**
+  (KV cache, per-token Hadamard rotation, dynamic shapes are unsupported).
+- **INT8-only**: a 27B model at INT8 = 27 GB > 16 GB RAM (won't fit); no ternary/2-bit path.
+- Memory-bound on the same LPDDR5 regardless. Multiple independent blockers → not viable.
+
+## Heterogeneous CPU+GPU: the ONE path with positive headroom (~1.1–1.2× realistic)
+Measured shared-bus behaviour (PQ2_0 27B, `-n 32 -t 8`):
+
+| Scenario | CPU decode | GPU useful work | Note |
+|----------|-----------:|----------------:|------|
+| CPU only (baseline) | **1.33 t/s** | — | uses ~9.8 GB/s of ~25 bus |
+| CPU + GPU full memory hog (19 GB/s) | **0.82 t/s** (−38%) | 0 (waste) | proves bus contention; **aggregate ceiling ≈ 25 GB/s** (5.95 CPU + 19 GPU) |
+| CPU + GPU running *useful* 2-bit GEMV | **1.30 t/s** (−2%) | **9.9 Gw/s** @ 2.5 GB/s | co-processor coexists almost free |
+
+**Interpretation:** the CPU decode is compute/barrier-bound (~9.8 GB/s of a ~25 GB/s bus), so a
+*light* GPU co-processor (2.5 GB/s) runs alongside it at only ~2% cost while adding ~9.9 Gw/s.
+Perfectly pipelined that is 35.4 + 9.9 = **45.3 Gw/s ≈ 1.68 t/s (1.26× ceiling)**. A full-blast
+GPU instead *robs* the CPU (−38%) — the margin is thin because the bus ceiling is only ~2.5× the
+CPU's usage, so the GPU must be bandwidth-throttled to its useful share.
+
+**Why it is still not worth building now:**
+- Realistic gain after tensor-parallel sync overhead (split every matmul CPU/GPU, barrier per
+  layer, marshal activations + Hadamard both sides, ~420 GPU dispatches/token) is ~**1.1–1.2×**,
+  not 1.26×.
+- Prerequisites that don't exist: **working Mali OpenCL kernels** (the port above is blocked)
+  and **tensor-parallel decode infrastructure** in the fork (absent).
+- Contrast the ROI: the CPU NEON kernels already delivered 2.26× (PTQ1_0) and 4.2× (PQ2_0) for
+  far less risk. A ~15% heterogeneous gain for a multi-week build is low priority.
+
+## Overall verdict for GPU/NPU decode
+NPU: not viable. GPU-alone: 2–3× regression. **CPU+GPU heterogeneous: physically possible with
+~1.1–1.2× headroom, but large effort + thin contention margin.** Keep decode on the tuned CPU
+NEON path; revisit heterogeneous only if a working Mali GEMV kernel and TP-decode infra already
+exist for another reason. Probes: `mali_hog.c`, `mali_gemvloop.c`.
